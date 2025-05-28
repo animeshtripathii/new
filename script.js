@@ -177,61 +177,162 @@ class ARModelViewer {
     }
 }
 
-// Initialize when the document is loaded
+// XR globals
+let xrButton = null;
+let xrRefSpace = null;
+let xrViewerSpace = null;
+let xrHitTestSource = null;
+let reticleHitTestResult = null;
+
+// WebGL scene globals
+let gl = null;
+let renderer = null;
+let scene = null;
+let reticle = null;
+
+// Model tracking
+const MAX_MODELS = 30;
+let placedModels = [];
+
 document.addEventListener('DOMContentLoaded', function() {
     const modelViewers = document.querySelectorAll('model-viewer');
     const hitTestStatus = document.getElementById('hit-test-status');
 
-    // Function to handle hit testing
-    function handleHitTest(modelViewer) {
-        const hitTestIndicator = modelViewer.querySelector('.hit-test-indicator');
-        
-        // Show status message
-        function showStatus(message) {
-            hitTestStatus.textContent = message;
-            hitTestStatus.style.display = 'block';
-            setTimeout(() => {
-                hitTestStatus.style.display = 'none';
-            }, 3000);
+    // Initialize XR
+    function initXR() {
+        if (navigator.xr) {
+            navigator.xr.isSessionSupported('immersive-ar')
+                .then((supported) => {
+                    if (supported) {
+                        setupARButton();
+                    } else {
+                        showStatus('AR not supported on this device', true);
+                    }
+                });
+        } else {
+            showStatus('WebXR not supported', true);
         }
+    }
 
-        // Handle AR session start
-        modelViewer.addEventListener('ar-status', (event) => {
-            if (event.detail.status === 'session-started') {
-                showStatus('AR session started. Move your device to detect surfaces.');
+    // Setup AR button
+    function setupARButton() {
+        const arButton = document.getElementById('ar-button');
+        const arStatus = document.getElementById('ar-status');
+
+        arButton.addEventListener('click', () => {
+            if (xrButton) {
+                onRequestSession();
             }
         });
 
-        // Handle hit testing
-        modelViewer.addEventListener('hit-test', (event) => {
-            const hitTestResult = event.detail;
-            
-            if (hitTestResult.hit) {
-                hitTestIndicator.style.display = 'block';
-                hitTestIndicator.style.left = `${hitTestResult.x}px`;
-                hitTestIndicator.style.top = `${hitTestResult.y}px`;
-                hitTestIndicator.classList.add('visible');
-            } else {
-                hitTestIndicator.classList.remove('visible');
-            }
-        });
+        arStatus.textContent = 'AR READY';
+    }
 
-        // Handle model placement
-        modelViewer.addEventListener('ar-placement', (event) => {
-            if (event.detail.status === 'placed') {
-                showStatus('Model placed successfully!');
-            }
-        });
-
-        // Handle errors
-        modelViewer.addEventListener('error', (error) => {
-            console.error('AR Error:', error);
-            showStatus('Error: ' + error.detail);
+    // Request AR session
+    function onRequestSession() {
+        return navigator.xr.requestSession('immersive-ar', {
+            requiredFeatures: ['local', 'hit-test']
+        }).then((session) => {
+            onSessionStarted(session);
         });
     }
 
-    // Initialize hit testing for each model viewer
-    modelViewers.forEach(handleHitTest);
+    // Handle session start
+    function onSessionStarted(session) {
+        session.addEventListener('end', onSessionEnded);
+        session.addEventListener('select', onSelect);
+
+        // Initialize WebGL context if not already done
+        if (!gl) {
+            gl = document.createElement('canvas').getContext('webgl', {
+                xrCompatible: true
+            });
+        }
+
+        // Create XR layer
+        session.updateRenderState({
+            baseLayer: new XRWebGLLayer(session, gl)
+        });
+
+        // Setup hit testing
+        session.requestReferenceSpace('viewer').then((refSpace) => {
+            xrViewerSpace = refSpace;
+            session.requestHitTestSource({ space: xrViewerSpace }).then((hitTestSource) => {
+                xrHitTestSource = hitTestSource;
+            });
+        });
+
+        // Get reference space
+        session.requestReferenceSpace('local').then((refSpace) => {
+            xrRefSpace = refSpace;
+            session.requestAnimationFrame(onXRFrame);
+        });
+    }
+
+    // Handle session end
+    function onSessionEnded() {
+        if (xrHitTestSource) {
+            xrHitTestSource.cancel();
+            xrHitTestSource = null;
+        }
+        xrRefSpace = null;
+        xrViewerSpace = null;
+        showStatus('AR session ended');
+    }
+
+    // Handle select event (placing models)
+    function onSelect(event) {
+        if (reticleHitTestResult) {
+            const modelViewer = document.querySelector('model-viewer[ar-status="presenting"]');
+            if (modelViewer) {
+                const hitPose = reticleHitTestResult.getPose(xrRefSpace);
+                if (hitPose) {
+                    // Place model at hit location
+                    modelViewer.arPlacement = 'floor';
+                    modelViewer.arPlacement = hitPose.transform.matrix;
+                    showStatus('Model placed successfully!');
+                }
+            }
+        }
+    }
+
+    // XR Frame update
+    function onXRFrame(timestamp, frame) {
+        const session = frame.session;
+        const pose = frame.getViewerPose(xrRefSpace);
+
+        // Update reticle visibility
+        const reticle = document.getElementById('reticle');
+        reticle.style.display = 'none';
+
+        // Perform hit testing
+        if (xrHitTestSource && pose) {
+            const hitTestResults = frame.getHitTestResults(xrHitTestSource);
+            if (hitTestResults.length > 0) {
+                const hitPose = hitTestResults[0].getPose(xrRefSpace);
+                reticle.style.display = 'block';
+                reticle.style.transform = `translate3d(${hitPose.transform.position.x}px, ${hitPose.transform.position.y}px, ${hitPose.transform.position.z}px)`;
+                reticleHitTestResult = hitTestResults[0];
+            }
+        }
+
+        // Request next frame
+        session.requestAnimationFrame(onXRFrame);
+    }
+
+    // Show status message
+    function showStatus(message, isError = false) {
+        hitTestStatus.textContent = message;
+        hitTestStatus.style.display = 'block';
+        hitTestStatus.style.backgroundColor = isError ? 'rgba(255, 0, 0, 0.8)' : 'rgba(0, 0, 0, 0.8)';
+        console.log('Status:', message);
+        setTimeout(() => {
+            hitTestStatus.style.display = 'none';
+        }, 3000);
+    }
+
+    // Initialize XR
+    initXR();
 
     // Handle model loading
     modelViewers.forEach(modelViewer => {
@@ -243,16 +344,19 @@ document.addEventListener('DOMContentLoaded', function() {
             const progress = event.detail.totalProgress;
             updateBar.style.transform = `scaleX(${progress})`;
             progressBar.classList.remove('hide');
+            console.log('Loading progress:', progress * 100 + '%');
         });
 
         modelViewer.addEventListener('load', () => {
             progressBar.classList.add('hide');
             arButton.style.display = 'block';
+            console.log('Model fully loaded');
         });
 
         modelViewer.addEventListener('error', (error) => {
             console.error('Error loading model:', error);
             progressBar.classList.add('hide');
+            showStatus('Error loading model: ' + error.detail, true);
         });
     });
 }); 
